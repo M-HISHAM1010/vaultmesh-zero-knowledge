@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { useParams } from "react-router-dom";
 import { downloadSharedCiphertext, getShareInfo } from "../lib/api";
 import {
   decryptBytes,
@@ -258,7 +258,7 @@ export default function SharePage() {
         {downloadStatus ? <p className="status">{downloadStatus}</p> : null}
 
         <p className="muted">
-          Need to manage shares? <Link to="/auth">Open owner dashboard</Link>
+          Owner controls are available only in the authenticated dashboard.
         </p>
       </section>
     </main>

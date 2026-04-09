@@ -144,10 +144,15 @@ export default function AuthPage({ onAuthenticated }) {
                       password: event.target.value,
                     }))
                   }
-                  minLength={8}
+                  minLength={10}
+                  title="At least 10 characters, including uppercase, lowercase, number, and symbol."
                   required
                 />
               </label>
+
+              <p className="muted">
+                Use 10+ characters with uppercase, lowercase, number, and symbol.
+              </p>
 
               <label>
                 Confirm password
@@ -160,7 +165,7 @@ export default function AuthPage({ onAuthenticated }) {
                       confirmPassword: event.target.value,
                     }))
                   }
-                  minLength={8}
+                  minLength={10}
                   required
                 />
               </label>

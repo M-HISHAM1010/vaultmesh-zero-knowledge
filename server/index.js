@@ -16,8 +16,16 @@ const { MongoClient, GridFSBucket, ObjectId } = require("mongodb");
 
 const app = express();
 
+const NODE_ENV = process.env.NODE_ENV || "development";
 const PORT = Number(process.env.PORT || 5000);
 const JWT_SECRET = process.env.JWT_SECRET || "change-me-in-production";
+const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || "8h";
+const BCRYPT_ROUNDS = Number(process.env.BCRYPT_ROUNDS || 12);
+const MIN_PASSWORD_LENGTH = Number(process.env.MIN_PASSWORD_LENGTH || 10);
+const SHARE_PASSWORD_MIN_LENGTH = Number(process.env.SHARE_PASSWORD_MIN_LENGTH || 6);
+const MAX_LOGIN_ATTEMPTS = Number(process.env.MAX_LOGIN_ATTEMPTS || 5);
+const LOGIN_LOCKOUT_MINUTES = Number(process.env.LOGIN_LOCKOUT_MINUTES || 15);
+const ENFORCE_HTTPS = process.env.ENFORCE_HTTPS === "true";
 const MAX_UPLOAD_BYTES = Number(
   process.env.MAX_UPLOAD_BYTES || 1024 * 1024 * 512,
 );
@@ -111,6 +119,59 @@ function isValidEmail(email) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 }
 
+function isStrongPassword(password) {
+  if (typeof password !== "string") {
+    return false;
+  }
+
+  if (password.length < MIN_PASSWORD_LENGTH) {
+    return false;
+  }
+
+  const hasUpper = /[A-Z]/.test(password);
+  const hasLower = /[a-z]/.test(password);
+  const hasDigit = /\d/.test(password);
+  const hasSpecial = /[^A-Za-z0-9]/.test(password);
+
+  return hasUpper && hasLower && hasDigit && hasSpecial;
+}
+
+function isValidBase64(value) {
+  if (typeof value !== "string") {
+    return false;
+  }
+
+  const sanitized = value.trim();
+  if (!sanitized || sanitized.length % 4 !== 0) {
+    return false;
+  }
+
+  return /^[A-Za-z0-9+/]+={0,2}$/.test(sanitized);
+}
+
+function isValidSha256Hex(value) {
+  if (typeof value !== "string") {
+    return false;
+  }
+  return /^[a-f0-9]{64}$/i.test(value.trim());
+}
+
+function getLoginLockUntilIso() {
+  return new Date(Date.now() + LOGIN_LOCKOUT_MINUTES * 60 * 1000).toISOString();
+}
+
+function getRemainingLockMinutes(lockUntil) {
+  if (typeof lockUntil !== "string") {
+    return 0;
+  }
+
+  const remainingMs = new Date(lockUntil).getTime() - Date.now();
+  if (remainingMs <= 0) {
+    return 0;
+  }
+  return Math.ceil(remainingMs / (60 * 1000));
+}
+
 function safeNumber(value) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) {
@@ -194,7 +255,7 @@ function createJwt(user) {
       name: user.name,
     },
     JWT_SECRET,
-    { expiresIn: "12h" },
+    { expiresIn: JWT_EXPIRES_IN },
   );
 }
 
@@ -474,9 +535,31 @@ app.use(cors(corsOptions));
 app.use(express.json({ limit: "2mb" }));
 app.use(morgan("tiny"));
 app.use((req, res, next) => {
+  if (!ENFORCE_HTTPS) {
+    next();
+    return;
+  }
+
+  const forwardedProto = String(req.headers["x-forwarded-proto"] || "")
+    .split(",")[0]
+    .trim()
+    .toLowerCase();
+
+  if (req.secure || forwardedProto === "https") {
+    next();
+    return;
+  }
+
+  res.status(400).json({ message: "HTTPS is required." });
+});
+app.use((req, res, next) => {
   const requestId = createRequestId();
   req.requestId = requestId;
   res.setHeader("X-Request-Id", requestId);
+  next();
+});
+app.use("/api", (_req, res, next) => {
+  res.setHeader("Cache-Control", "no-store");
   next();
 });
 app.use("/api", globalRateLimiter);
@@ -505,8 +588,11 @@ app.post("/api/auth/register", authRateLimiter, async (req, res) => {
     return;
   }
 
-  if (password.length < 8) {
-    res.status(400).json({ message: "Password must be at least 8 characters long." });
+  if (!isStrongPassword(password)) {
+    res.status(400).json({
+      message:
+        `Password must be at least ${MIN_PASSWORD_LENGTH} characters and include uppercase, lowercase, number, and symbol.`,
+    });
     return;
   }
 
@@ -521,7 +607,9 @@ app.post("/api/auth/register", authRateLimiter, async (req, res) => {
       id: createId("usr"),
       name,
       email,
-      passwordHash: await bcrypt.hash(password, 10),
+      passwordHash: await bcrypt.hash(password, BCRYPT_ROUNDS),
+      failedLoginCount: 0,
+      lockUntil: null,
       createdAt: nowIso(),
     };
 
@@ -549,23 +637,62 @@ app.post("/api/auth/login", authRateLimiter, async (req, res) => {
     return;
   }
 
-  const db = await readDb();
-  const user = db.users.find((entry) => entry.email === email);
-  if (!user) {
-    res.status(401).json({ message: "Invalid login credentials." });
-    return;
-  }
+  const result = await withDbLock(async () => {
+    const db = await readDb();
+    const user = db.users.find((entry) => entry.email === email);
+    if (!user) {
+      return {
+        status: 401,
+        body: { message: "Invalid login credentials." },
+      };
+    }
 
-  const validPassword = await bcrypt.compare(password, user.passwordHash);
-  if (!validPassword) {
-    res.status(401).json({ message: "Invalid login credentials." });
-    return;
-  }
+    const now = Date.now();
+    const lockUntilMs = user.lockUntil ? new Date(user.lockUntil).getTime() : 0;
+    if (lockUntilMs && lockUntilMs > now) {
+      return {
+        status: 423,
+        body: {
+          message: `Account temporarily locked. Try again in ${getRemainingLockMinutes(
+            user.lockUntil,
+          )} minute(s).`,
+        },
+      };
+    }
 
-  res.json({
-    token: createJwt(user),
-    user: sanitizeUser(user),
+    const validPassword = await bcrypt.compare(password, user.passwordHash);
+    if (!validPassword) {
+      user.failedLoginCount = Number.isInteger(user.failedLoginCount)
+        ? user.failedLoginCount + 1
+        : 1;
+
+      if (user.failedLoginCount >= MAX_LOGIN_ATTEMPTS) {
+        user.lockUntil = getLoginLockUntilIso();
+        user.failedLoginCount = 0;
+      }
+
+      await writeDb(db);
+
+      return {
+        status: 401,
+        body: { message: "Invalid login credentials." },
+      };
+    }
+
+    user.failedLoginCount = 0;
+    user.lockUntil = null;
+    await writeDb(db);
+
+    return {
+      status: 200,
+      body: {
+        token: createJwt(user),
+        user: sanitizeUser(user),
+      },
+    };
   });
+
+  res.status(result.status).json(result.body);
 });
 
 app.get("/api/files", authRequired, async (req, res) => {
@@ -601,12 +728,14 @@ app.post("/api/files/upload", authRequired, upload.single("encryptedFile"), asyn
       return;
     }
 
-    const encryptedName = typeof req.body?.encryptedName === "string" ? req.body.encryptedName : "";
+    const encryptedName =
+      typeof req.body?.encryptedName === "string" ? req.body.encryptedName.trim() : "";
     const encryptedNameIv =
-      typeof req.body?.encryptedNameIv === "string" ? req.body.encryptedNameIv : "";
+      typeof req.body?.encryptedNameIv === "string" ? req.body.encryptedNameIv.trim() : "";
     const encryptedFileIv =
-      typeof req.body?.encryptedFileIv === "string" ? req.body.encryptedFileIv : "";
-    const fileHash = typeof req.body?.fileHash === "string" ? req.body.fileHash : "";
+      typeof req.body?.encryptedFileIv === "string" ? req.body.encryptedFileIv.trim() : "";
+    const fileHash =
+      typeof req.body?.fileHash === "string" ? req.body.fileHash.trim().toLowerCase() : "";
     const cipherAlgorithm =
       typeof req.body?.cipherAlgorithm === "string" ? req.body.cipherAlgorithm : "AES-GCM";
     const mimeType =
@@ -621,6 +750,36 @@ app.post("/api/files/upload", authRequired, upload.single("encryptedFile"), asyn
         message:
           "Missing encrypted metadata. Provide encryptedName, encryptedNameIv, encryptedFileIv, and fileHash.",
       });
+      return;
+    }
+
+    if (
+      !isValidBase64(encryptedName) ||
+      !isValidBase64(encryptedNameIv) ||
+      !isValidBase64(encryptedFileIv)
+    ) {
+      await safeUnlink(req.file.path);
+      res.status(400).json({ message: "Encrypted metadata contains invalid base64 values." });
+      return;
+    }
+
+    if (!isValidSha256Hex(fileHash)) {
+      await safeUnlink(req.file.path);
+      res.status(400).json({ message: "fileHash must be a valid SHA-256 hex string." });
+      return;
+    }
+
+    if (encryptedName.length > 4096 || encryptedNameIv.length > 128 || encryptedFileIv.length > 128) {
+      await safeUnlink(req.file.path);
+      res.status(400).json({ message: "Encrypted metadata exceeds allowed length." });
+      return;
+    }
+
+    if (originalSize !== null && (!isPositiveInteger(originalSize) || originalSize > MAX_UPLOAD_BYTES)) {
+      await safeUnlink(req.file.path);
+      res
+        .status(400)
+        .json({ message: "originalSize must be a positive integer within upload size limits." });
       return;
     }
 
@@ -665,6 +824,13 @@ app.post("/api/files/:fileId/shares", authRequired, async (req, res) => {
   const oneTime = Boolean(req.body?.oneTime);
   const password = typeof req.body?.password === "string" ? req.body.password.trim() : "";
 
+  if (password && password.length < SHARE_PASSWORD_MIN_LENGTH) {
+    res.status(400).json({
+      message: `Share password must be at least ${SHARE_PASSWORD_MIN_LENGTH} characters long.`,
+    });
+    return;
+  }
+
   let expiresAt = null;
   if (rawExpiresInHours !== undefined && rawExpiresInHours !== null && rawExpiresInHours !== "") {
     const hours = safeNumber(rawExpiresInHours);
@@ -704,7 +870,7 @@ app.post("/api/files/:fileId/shares", authRequired, async (req, res) => {
       downloadCount: 0,
       oneTime,
       revoked: false,
-      passwordHash: password ? await bcrypt.hash(password, 10) : null,
+      passwordHash: password ? await bcrypt.hash(password, BCRYPT_ROUNDS) : null,
     };
 
     db.shares.push(share);
@@ -970,7 +1136,12 @@ async function start() {
     console.log(
       `Storage mode: ${USE_ATLAS ? `atlas (${MONGODB_DB_NAME})` : "local-json"}`,
     );
+    console.log(`HTTPS enforcement: ${ENFORCE_HTTPS ? "enabled" : "disabled"}`);
     console.log(`Allowed origins: ${allowedOrigins.join(", ")}`);
+
+    if (NODE_ENV === "production" && JWT_SECRET === "change-me-in-production") {
+      console.warn("Security warning: JWT_SECRET is using default value in production.");
+    }
   });
 }
 

@@ -124,3 +124,7 @@ After Vercel deploy is ready:
 - Decryption keys are never sent to backend.
 - Key fragment (#k=...) stays client-side.
 - Replace JWT_SECRET with a strong secret in production.
+- Login includes temporary account lockout after repeated failed attempts.
+- Registration enforces stronger password complexity policy.
+- Upload metadata is validated (base64/sha256/size checks) before persistence.
+- Set ENFORCE_HTTPS=true in production to block non-HTTPS requests.
