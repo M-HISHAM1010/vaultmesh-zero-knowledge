@@ -483,6 +483,30 @@ function createDownloadStreamFromRecord(fileRecord) {
   return fs.createReadStream(filePath);
 }
 
+async function hasDownloadPayload(fileRecord) {
+  if (USE_ATLAS) {
+    if (!fileRecord.gridFsFileId || !mongoDb) {
+      return false;
+    }
+
+    try {
+      const doc = await mongoDb
+        .collection("encrypted_files.files")
+        .findOne({ _id: new ObjectId(fileRecord.gridFsFileId) }, { projection: { _id: 1 } });
+      return Boolean(doc);
+    } catch {
+      return false;
+    }
+  }
+
+  if (!fileRecord.storedName) {
+    return false;
+  }
+
+  const filePath = path.join(STORAGE_DIR, fileRecord.storedName);
+  return pathExists(filePath);
+}
+
 function addAccessLog(db, payload) {
   db.accessLogs.push({
     id: createId("log"),
@@ -1080,8 +1104,25 @@ app.post("/api/shares/:token/download", downloadRateLimiter, async (req, res) =>
     return;
   }
 
+  const hasPayload = await hasDownloadPayload(result.file);
+  if (!hasPayload) {
+    res.status(404).json({
+      message:
+        "Encrypted file content is unavailable. Ask the owner to re-upload and create a new share link.",
+    });
+    return;
+  }
+
+  const stream = createDownloadStreamFromRecord(result.file);
+  if (!stream) {
+    res.status(500).json({ message: "Encrypted data file is missing on server storage." });
+    return;
+  }
+
   res.setHeader("Content-Type", "application/octet-stream");
-  res.setHeader("Content-Length", String(result.file.size));
+  if (Number.isFinite(result.file.size) && result.file.size > 0) {
+    res.setHeader("Content-Length", String(result.file.size));
+  }
   res.setHeader("Content-Disposition", `attachment; filename="${result.file.id}.enc"`);
   res.setHeader("X-File-Hash", result.file.fileHash);
   res.setHeader("X-Encrypted-Name", result.file.encryptedName);
@@ -1091,12 +1132,6 @@ app.post("/api/shares/:token/download", downloadRateLimiter, async (req, res) =>
   res.setHeader("X-Original-Mime-Type", result.file.mimeType || "application/octet-stream");
   if (result.file.originalSize) {
     res.setHeader("X-Original-Size", String(result.file.originalSize));
-  }
-
-  const stream = createDownloadStreamFromRecord(result.file);
-  if (!stream) {
-    res.status(500).json({ message: "Encrypted data file is missing on server storage." });
-    return;
   }
 
   stream.on("error", (error) => {
