@@ -368,20 +368,11 @@ export default function DashboardPage({ token, user, onLogout }) {
           <p className="muted">
             Link key is placed in the URL fragment so the server never receives it.
           </p>
-          <button
-            className="btn ghost"
-            type="button"
-            disabled={filesLoading || shareSubmitting}
-            onClick={() => refreshFiles({ withLoader: true })}
-          >
-            {filesLoading ? "Refreshing..." : "Refresh file list"}
-          </button>
           <form className="form-grid" onSubmit={handleShareCreation}>
             <label>
               File
               <select
                 value={shareForm.fileId}
-                disabled={!hasFiles}
                 onChange={(event) =>
                   setShareForm((current) => ({
                     ...current,
@@ -390,7 +381,7 @@ export default function DashboardPage({ token, user, onLogout }) {
                 }
               >
                 <option value="" disabled>
-                  {hasFiles ? "Select encrypted file" : "No encrypted file available"}
+                  Select encrypted file
                 </option>
                 {files.map((file) => (
                   <option value={file.id} key={file.id}>
@@ -469,11 +460,7 @@ export default function DashboardPage({ token, user, onLogout }) {
 
             {shareError ? <p className="status error">{shareError}</p> : null}
 
-            <button
-              className="btn primary"
-              type="submit"
-              disabled={shareSubmitting || !hasFiles}
-            >
+            <button className="btn primary" type="submit" disabled={shareSubmitting}>
               {shareSubmitting ? "Generating..." : "Create encrypted link"}
             </button>
           </form>
