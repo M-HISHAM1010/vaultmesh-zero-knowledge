@@ -256,10 +256,6 @@ export default function SharePage() {
         </button>
 
         {downloadStatus ? <p className="status">{downloadStatus}</p> : null}
-
-        <p className="muted">
-          Owner controls are available only in the authenticated dashboard.
-        </p>
       </section>
     </main>
   );
