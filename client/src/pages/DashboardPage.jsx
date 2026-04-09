@@ -79,6 +79,8 @@ export default function DashboardPage({ token, user, onLogout }) {
     return `${files.length} encrypted files`;
   }, [files.length]);
 
+  const hasFiles = files.length > 0;
+
   const refreshFiles = useCallback(
     async ({ withLoader = true } = {}) => {
       if (withLoader) {
@@ -109,7 +111,20 @@ export default function DashboardPage({ token, user, onLogout }) {
   }, [refreshFiles]);
 
   useEffect(() => {
-    if (shareForm.fileId || files.length === 0) {
+    if (files.length === 0) {
+      if (!shareForm.fileId) {
+        return;
+      }
+
+      setShareForm((current) => ({
+        ...current,
+        fileId: "",
+      }));
+      return;
+    }
+
+    const selectedExists = files.some((file) => file.id === shareForm.fileId);
+    if (selectedExists) {
       return;
     }
 
@@ -223,8 +238,18 @@ export default function DashboardPage({ token, user, onLogout }) {
     setShareError("");
     setShareLink("");
 
+    if (!hasFiles) {
+      setShareError("No encrypted files found. Upload one first, then create the share link.");
+      return;
+    }
+
     if (!shareForm.fileId) {
       setShareError("Select a file to generate a share link.");
+      return;
+    }
+
+    if (shareForm.password.trim() && shareForm.password.trim().length < 6) {
+      setShareError("Share password must be at least 6 characters.");
       return;
     }
 
@@ -343,21 +368,29 @@ export default function DashboardPage({ token, user, onLogout }) {
           <p className="muted">
             Link key is placed in the URL fragment so the server never receives it.
           </p>
+          <button
+            className="btn ghost"
+            type="button"
+            disabled={filesLoading || shareSubmitting}
+            onClick={() => refreshFiles({ withLoader: true })}
+          >
+            {filesLoading ? "Refreshing..." : "Refresh file list"}
+          </button>
           <form className="form-grid" onSubmit={handleShareCreation}>
             <label>
               File
               <select
                 value={shareForm.fileId}
+                disabled={!hasFiles}
                 onChange={(event) =>
                   setShareForm((current) => ({
                     ...current,
                     fileId: event.target.value,
                   }))
                 }
-                required
               >
                 <option value="" disabled>
-                  Select encrypted file
+                  {hasFiles ? "Select encrypted file" : "No encrypted file available"}
                 </option>
                 {files.map((file) => (
                   <option value={file.id} key={file.id}>
@@ -366,6 +399,10 @@ export default function DashboardPage({ token, user, onLogout }) {
                 ))}
               </select>
             </label>
+
+            {!hasFiles ? (
+              <p className="status">Upload an encrypted file first to enable secure sharing.</p>
+            ) : null}
 
             <label>
               Expires in hours
@@ -411,6 +448,7 @@ export default function DashboardPage({ token, user, onLogout }) {
                     password: event.target.value,
                   }))
                 }
+                minLength={6}
                 placeholder="Add extra access password"
               />
             </label>
@@ -431,7 +469,11 @@ export default function DashboardPage({ token, user, onLogout }) {
 
             {shareError ? <p className="status error">{shareError}</p> : null}
 
-            <button className="btn primary" type="submit" disabled={shareSubmitting}>
+            <button
+              className="btn primary"
+              type="submit"
+              disabled={shareSubmitting || !hasFiles}
+            >
               {shareSubmitting ? "Generating..." : "Create encrypted link"}
             </button>
           </form>
