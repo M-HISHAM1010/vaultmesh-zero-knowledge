@@ -1,0 +1,22 @@
+# Dependencies
+node_modules/
+client/node_modules/
+server/node_modules/
+
+# Build artifacts
+client/dist/
+dist/
+
+# Environment files (never commit secrets)
+.env
+client/.env
+server/.env
+
+# Runtime data and temp files
+server/data/
+*.log
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.vscode/
